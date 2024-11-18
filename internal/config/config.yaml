@@ -1,0 +1,14 @@
+server:
+  port: 8080
+
+database:
+  postgres:
+    port: 5432
+    host: "localhost"
+    password: "postgres"
+    username: "postgres"
+    db_name: "sessionbrdigedb"
+  redis:
+    address: "localhost:6379"
+    password:
+    db_name: 0
