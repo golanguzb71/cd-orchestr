@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"log"
 	"session-bridge/internal/config"
@@ -21,6 +22,18 @@ import (
 // @name Authorization
 func main() {
 	r := gin.Default()
+
+	// CORS configuration
+	corsConfig := cors.Config{
+		AllowOrigins:     []string{"*"},                                                       // Allow all origins, you can restrict this to specific domains
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},                 // Allowed methods
+		AllowHeaders:     []string{"Authorization", "Content-Type", "Accept", "x-session-id"}, // Allow x-session-id header
+		AllowCredentials: true,
+	}
+
+	// Apply CORS middleware
+	r.Use(cors.New(corsConfig))
+
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Fatalf("error while loading config %v", err)

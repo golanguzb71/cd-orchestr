@@ -20,6 +20,7 @@ func SetupRoutes(r *gin.Engine, redis *db.Redis) {
 		fileFolder.POST("/create/:type", controller.CreateFolder)
 		fileFolder.PUT("/edit/:name", controller.EditPath)
 		fileFolder.DELETE("/delete", controller.DeletePath)
+		fileFolder.POST("/open-file", controller.OpenFile)
 	}
 	git := r.Group("/git")
 	{

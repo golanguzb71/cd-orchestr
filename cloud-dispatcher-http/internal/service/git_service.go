@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"golang.org/x/crypto/ssh"
+	"path/filepath"
 	"session-bridge/internal/db"
 	models "session-bridge/internal/model"
+	"strings"
 	"time"
 )
 
@@ -17,25 +19,46 @@ func NewGitService(redis *db.Redis) *GitService {
 	return &GitService{redis: redis}
 }
 
-// CloneRepo clones a repository to a specified path on the server
 func (s *GitService) CloneRepo(conn *models.ServerConnection, req *models.GitCloneRequest) error {
 	client, err := s.getSSHClient(conn)
 	if err != nil {
 		return fmt.Errorf("failed to get SSH client: %v", err)
 	}
 	defer client.Close()
-
+	urlParts := strings.Split(req.RepoURL, "/")
+	repoName := urlParts[len(urlParts)-1]
+	repoName = strings.TrimSuffix(repoName, ".git")
+	req.DestinationPath = filepath.Join("/home/abdulaziz", repoName)
+	checkCmd := fmt.Sprintf("if [ -d \"%s\" ]; then echo \"exists\"; else echo \"not exists\"; fi", req.DestinationPath)
 	session, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create SSH session: %v", err)
 	}
 	defer session.Close()
 
-	cmd := fmt.Sprintf("git clone %s %s", req.RepoURL, req.DestinationPath)
-
 	var stderr bytes.Buffer
 	session.Stderr = &stderr
+	var stdout bytes.Buffer
+	session.Stdout = &stdout
 
+	err = session.Run(checkCmd)
+	if err != nil {
+		return fmt.Errorf("failed to check directory existence: %v, stderr: %s", err, stderr.String())
+	}
+
+	if stdout.String() == "exists\n" {
+		return fmt.Errorf("destination path '%s' already exists and is not empty", req.DestinationPath)
+	}
+
+	cmd := fmt.Sprintf("git clone %s %s", req.RepoURL, req.DestinationPath)
+
+	session, err = client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create SSH session: %v", err)
+	}
+	defer session.Close()
+
+	session.Stderr = &stderr
 	err = session.Run(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to run command '%s': %v, stderr: %s", cmd, err, stderr.String())
@@ -44,7 +67,6 @@ func (s *GitService) CloneRepo(conn *models.ServerConnection, req *models.GitClo
 	return nil
 }
 
-// PullRepo pulls changes from a specified branch
 func (s *GitService) PullRepo(conn *models.ServerConnection, req *models.GitPullRequest) error {
 	client, err := s.getSSHClient(conn)
 	if err != nil {
@@ -71,7 +93,6 @@ func (s *GitService) PullRepo(conn *models.ServerConnection, req *models.GitPull
 	return nil
 }
 
-// PushRepo commits and pushes changes to the repository
 func (s *GitService) PushRepo(conn *models.ServerConnection, req *models.GitPushRequest) error {
 	client, err := s.getSSHClient(conn)
 	if err != nil {
@@ -85,7 +106,12 @@ func (s *GitService) PushRepo(conn *models.ServerConnection, req *models.GitPush
 	}
 	defer session.Close()
 
-	cmd := fmt.Sprintf("cd %s && git add . && git commit -m \"%s\" && git push origin %s", req.RepoPath, req.CommitMessage, req.Branch)
+	cmd := ""
+	if req.IsFilled {
+		cmd = fmt.Sprintf("cd %s && git add . && git commit -m \"%s\" && git push origin %s", req.RepoPath, req.CommitMessage, req.Branch)
+	} else {
+		cmd = fmt.Sprintf("cd %s && git push origin %s", req.RepoPath, req.Branch)
+	}
 
 	var stderr bytes.Buffer
 	session.Stderr = &stderr
@@ -98,7 +124,6 @@ func (s *GitService) PushRepo(conn *models.ServerConnection, req *models.GitPush
 	return nil
 }
 
-// AddFiles stages files for commit
 func (s *GitService) AddFiles(conn *models.ServerConnection, req *models.GitAddRequest) error {
 	client, err := s.getSSHClient(conn)
 	if err != nil {
@@ -125,7 +150,6 @@ func (s *GitService) AddFiles(conn *models.ServerConnection, req *models.GitAddR
 	return nil
 }
 
-// CommitChanges commits staged changes with a message
 func (s *GitService) CommitChanges(conn *models.ServerConnection, req *models.GitCommitRequest) error {
 	client, err := s.getSSHClient(conn)
 	if err != nil {
@@ -152,7 +176,6 @@ func (s *GitService) CommitChanges(conn *models.ServerConnection, req *models.Gi
 	return nil
 }
 
-// SwitchBranch switches to a specified branch
 func (s *GitService) SwitchBranch(conn *models.ServerConnection, req *models.GitSwitchBranchRequest) error {
 	client, err := s.getSSHClient(conn)
 	if err != nil {

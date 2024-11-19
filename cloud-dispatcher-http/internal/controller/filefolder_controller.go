@@ -93,3 +93,7 @@ func DeletePath(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Path deleted successfully"})
 }
+
+func OpenFile(ctx *gin.Context) {
+
+}
