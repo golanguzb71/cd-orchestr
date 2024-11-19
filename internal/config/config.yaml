@@ -7,7 +7,7 @@ database:
     host: "localhost"
     password: "postgres"
     username: "postgres"
-    db_name: "sessionbrdigedb"
+    db_name: "sessionbridgedb"
   redis:
     address: "localhost:6379"
     password:
