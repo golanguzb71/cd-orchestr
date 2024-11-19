@@ -10,11 +10,13 @@ import (
 var (
 	connService       *service.ConnectionService
 	fileFolderService *service.FileFolderService
+	gitService        *service.GitService
 )
 
-func SetConnectionService(connSer *service.ConnectionService, ffService *service.FileFolderService) {
+func SetConnectionService(connSer *service.ConnectionService, ffService *service.FileFolderService, gitSer *service.GitService) {
 	connService = connSer
 	fileFolderService = ffService
+	gitService = gitSer
 }
 
 func CreateConnection(c *gin.Context) {

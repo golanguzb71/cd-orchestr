@@ -31,7 +31,8 @@ func main() {
 	ffService := service.NewFileFolderService(redis)
 	connectionRepo := repo.NewConnectionRepository(database, redis)
 	connectionService := service.NewConnectionService(connectionRepo)
-	controller.SetConnectionService(connectionService, ffService)
+	gitService := service.NewGitService(redis)
+	controller.SetConnectionService(connectionService, ffService, gitService)
 	routes.SetupRoutes(r, redis)
 	r.Run(":8888")
 }
