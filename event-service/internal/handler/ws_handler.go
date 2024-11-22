@@ -2,14 +2,15 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	pb "jprq-event/protos/pb"
-	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -32,53 +33,53 @@ func NewEventServer(rdb *redis.Client) *EventServer {
 }
 
 func (s *EventServer) HandleRequest(ctx context.Context, req *pb.Request) (*pb.Response, error) {
-	// Get the port for the given domain from Redis
+	// Get the port for the given domain
 	port, err := s.rdb.Get(ctx, req.Domain).Result()
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "domain not found: %v", err)
 	}
 
-	// Retrieve the connection for the domain
+	// Get the connection for the domain
 	conn, exists := s.connections[req.Domain]
 	if !exists {
 		return nil, status.Errorf(codes.NotFound, "no active connection for domain")
 	}
 
-	fmt.Printf("Forwarding request for domain %s (port: %s)\n", req.Domain, port)
-
-	// Prepare the request data to be forwarded over WebSocket
+	// Forward the request through WebSocket
 	wsRequest := map[string]interface{}{
 		"method":  req.Method,
 		"path":    req.Path,
 		"headers": req.Headers,
 		"body":    req.Body,
+		"port":    port,
 	}
-
-	// Send the request over the WebSocket connection
 	if err := conn.WsConn.WriteJSON(wsRequest); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to write to websocket: %v", err)
 	}
 
-	// Receive the response from WebSocket
-	var wsResponse map[string]interface{}
-	if err := conn.WsConn.ReadJSON(&wsResponse); err != nil {
+	// Read the response from WebSocket
+	_, message, err := conn.WsConn.ReadMessage()
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read from websocket: %v", err)
 	}
 
-	// Prepare the response from WebSocket data
-	response := &pb.Response{
-		StatusCode: int32(wsResponse["status_code"].(float64)),
-		Headers:    make(map[string]string),
-		Body:       wsResponse["body"].([]byte),
+	// Return the response as is (no additional processing)
+	var response struct {
+		StatusCode int               `json:"status_code"`
+		Headers    map[string]string `json:"headers"`
+		Body       string            `json:"body"`
 	}
 
-	if headers, ok := wsResponse["headers"].(map[string]interface{}); ok {
-		for k, v := range headers {
-			response.Headers[k] = fmt.Sprint(v)
-		}
+	if err := json.Unmarshal(message, &response); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to parse response: %v", err)
 	}
 
-	return response, nil
+	// Return the response directly
+	return &pb.Response{
+		StatusCode: int32(response.StatusCode),
+		Headers:    response.Headers,
+		Body:       map[string]string{"message": response.Body},
+	}, nil
 }
 
 func (s *EventServer) RegisterConnection(domain string, conn *TunnelConnection) {
@@ -100,54 +101,77 @@ func NewWebSocketHandler(rdb *redis.Client, eventServer *EventServer) *WebSocket
 		eventServer: eventServer,
 	}
 }
-
 func (h *WebSocketHandler) HandleTunnel(w http.ResponseWriter, r *http.Request) {
-	// Upgrade HTTP request to WebSocket connection
 	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true }, // Allow all origins
+		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade to WebSocket: %v", err)
-		http.Error(w, "Failed to upgrade to WebSocket: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to upgrade connection", http.StatusInternalServerError)
 		return
 	}
 	defer conn.Close()
 
-	// Get domain and port from the query parameters
 	domain := r.URL.Query().Get("domain")
 	port := r.URL.Query().Get("port")
 
 	if domain == "" || port == "" {
-		// If the domain or port is missing, send a WebSocket-specific error message
-		log.Println("Domain and Port are required")
-		conn.WriteMessage(websocket.TextMessage, []byte("Domain and Port are required"))
+		sendErrorResponse(conn, "Domain and Port are required", http.StatusBadRequest)
 		return
 	}
 
-	// Register the WebSocket connection for the domain
 	tunnelConn := &TunnelConnection{
 		Port:   port,
 		WsConn: conn,
 	}
 	h.eventServer.RegisterConnection(domain, tunnelConn)
-	h.rdb.Set(context.TODO(), domain, port, 100000*time.Second)
-	// Handle WebSocket communication
+	defer h.eventServer.UnregisterConnection(domain)
+
+	h.rdb.Set(context.TODO(), domain, port, 24*time.Hour)
+
 	for {
-		var msg map[string]interface{}
-		if err := conn.ReadJSON(&msg); err != nil {
-			log.Printf("Error reading WebSocket message: %v", err)
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				fmt.Println("WebSocket closed unexpectedly:", err)
+			}
 			break
 		}
 
-		// Process the received message
-		fmt.Printf("Received message: %v\n", msg)
+		if messageType != websocket.TextMessage {
+			continue
+		}
 
-		// Example: You can send a response back via WebSocket if needed
-		// e.g., conn.WriteJSON(response)
+		// Just forward the incoming WebSocket message as is
+		err = conn.WriteMessage(messageType, message)
+		if err != nil {
+			fmt.Println("Error forwarding message:", err)
+			break
+		}
 	}
+}
 
-	// Unregister the connection once done
-	h.eventServer.UnregisterConnection(domain)
+func isValidMethod(method string) bool {
+	validMethods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}
+	method = strings.ToUpper(method)
+	for _, valid := range validMethods {
+		if valid == method {
+			return true
+		}
+	}
+	return false
+}
+
+func sendErrorResponse(conn *websocket.Conn, message string, statusCode int) {
+	response := map[string]interface{}{
+		"status_code": statusCode,
+		"headers":     map[string]string{"Content-Type": "application/json"},
+		"body":        message,
+	}
+	conn.WriteJSON(response)
+}
+
+func forwardMessageAsIs(conn *websocket.Conn, message []byte) {
+	conn.WriteMessage(websocket.TextMessage, message)
 }

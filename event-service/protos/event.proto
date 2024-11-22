@@ -9,14 +9,13 @@ message Request {
   string method = 2;
   string path = 3;
   map<string, string> headers = 4;
-  bytes body = 5;
+  map<string, string> body = 5;  // Change body to map<string, string>
 }
-
 
 message Response {
   int32 status_code = 1;
   map<string, string> headers = 2;
-  bytes body = 3;
+  map<string, string> body = 3;  // Body in response should also be map<string, string>
   string error = 4;
 }
 
