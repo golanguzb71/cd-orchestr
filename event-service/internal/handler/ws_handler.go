@@ -101,6 +101,7 @@ func NewWebSocketHandler(rdb *redis.Client, eventServer *EventServer) *WebSocket
 		eventServer: eventServer,
 	}
 }
+
 func (h *WebSocketHandler) HandleTunnel(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -151,7 +152,6 @@ func (h *WebSocketHandler) HandleTunnel(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 }
-
 func isValidMethod(method string) bool {
 	validMethods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}
 	method = strings.ToUpper(method)
