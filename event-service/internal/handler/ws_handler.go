@@ -4,25 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	pb "jprq-event/protos/pb"
-	"net/http"
-	"strings"
-	"time"
 )
 
 type TunnelConnection struct {
-	Port   string
-	WsConn *websocket.Conn
+	Port         string
+	WsConn       *websocket.Conn
+	ResponseChan chan []byte
+	mu           sync.Mutex
 }
 
 type EventServer struct {
 	pb.UnimplementedEventServiceServer
 	rdb         *redis.Client
 	connections map[string]*TunnelConnection
+	mu          sync.RWMutex
 }
 
 func NewEventServer(rdb *redis.Client) *EventServer {
@@ -33,60 +37,67 @@ func NewEventServer(rdb *redis.Client) *EventServer {
 }
 
 func (s *EventServer) HandleRequest(ctx context.Context, req *pb.Request) (*pb.Response, error) {
-	// Get the port for the given domain
-	port, err := s.rdb.Get(ctx, req.Domain).Result()
-	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "domain not found: %v", err)
-	}
-
-	// Get the connection for the domain
+	s.mu.RLock()
 	conn, exists := s.connections[req.Domain]
-	if !exists {
+	s.mu.RUnlock()
+
+	if !exists || conn.WsConn == nil {
 		return nil, status.Errorf(codes.NotFound, "no active connection for domain")
 	}
 
-	// Forward the request through WebSocket
+	// Prepare full request payload
 	wsRequest := map[string]interface{}{
 		"method":  req.Method,
 		"path":    req.Path,
 		"headers": req.Headers,
 		"body":    req.Body,
-		"port":    port,
 	}
+
+	// Synchronize WebSocket access
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+
+	// Reset response channel
+	conn.ResponseChan = make(chan []byte, 1)
+
+	// Send request through WebSocket
 	if err := conn.WsConn.WriteJSON(wsRequest); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to write to websocket: %v", err)
 	}
 
-	// Read the response from WebSocket
-	_, message, err := conn.WsConn.ReadMessage()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to read from websocket: %v", err)
-	}
+	// Wait for response with timeout
+	select {
+	case <-ctx.Done():
+		return nil, status.Errorf(codes.DeadlineExceeded, "timeout while reading response")
+	case message := <-conn.ResponseChan:
+		// Parse WebSocket response
+		var response struct {
+			StatusCode int32             `json:"status_code"`
+			Headers    map[string]string `json:"headers"`
+			Body       json.RawMessage   `json:"body"`
+		}
 
-	// Return the response as is (no additional processing)
-	var response struct {
-		StatusCode int               `json:"status_code"`
-		Headers    map[string]string `json:"headers"`
-		Body       string            `json:"body"`
-	}
+		if err := json.Unmarshal(message, &response); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to parse response: %v", err)
+		}
 
-	if err := json.Unmarshal(message, &response); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to parse response: %v", err)
+		return &pb.Response{
+			StatusCode: response.StatusCode,
+			Headers:    response.Headers,
+			Body:       map[string]string{"message": string(response.Body)},
+		}, nil
 	}
-
-	// Return the response directly
-	return &pb.Response{
-		StatusCode: int32(response.StatusCode),
-		Headers:    response.Headers,
-		Body:       map[string]string{"message": response.Body},
-	}, nil
 }
 
 func (s *EventServer) RegisterConnection(domain string, conn *TunnelConnection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.connections[domain] = conn
 }
 
 func (s *EventServer) UnregisterConnection(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.connections, domain)
 }
 
@@ -122,17 +133,25 @@ func (h *WebSocketHandler) HandleTunnel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Store port in Redis with a 24-hour expiration
+	ctx := context.Background()
+	err = h.rdb.Set(ctx, domain, port, 24*time.Hour).Err()
+	if err != nil {
+		sendErrorResponse(conn, "Failed to store port", http.StatusInternalServerError)
+		return
+	}
+
 	tunnelConn := &TunnelConnection{
-		Port:   port,
-		WsConn: conn,
+		Port:         port,
+		WsConn:       conn,
+		ResponseChan: make(chan []byte, 1),
 	}
 	h.eventServer.RegisterConnection(domain, tunnelConn)
 	defer h.eventServer.UnregisterConnection(domain)
 
-	h.rdb.Set(context.TODO(), domain, port, 24*time.Hour)
-
+	// Keep WebSocket connection open and handle incoming messages
 	for {
-		messageType, message, err := conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				fmt.Println("WebSocket closed unexpectedly:", err)
@@ -140,27 +159,10 @@ func (h *WebSocketHandler) HandleTunnel(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 
-		if messageType != websocket.TextMessage {
-			continue
-		}
-
-		// Just forward the incoming WebSocket message as is
-		err = conn.WriteMessage(messageType, message)
-		if err != nil {
-			fmt.Println("Error forwarding message:", err)
-			break
-		}
+		// Send received message to the response channel
+		tunnelConn.ResponseChan <- message
+		fmt.Println("Received message in HandleTunnel:", string(message))
 	}
-}
-func isValidMethod(method string) bool {
-	validMethods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}
-	method = strings.ToUpper(method)
-	for _, valid := range validMethods {
-		if valid == method {
-			return true
-		}
-	}
-	return false
 }
 
 func sendErrorResponse(conn *websocket.Conn, message string, statusCode int) {
@@ -170,8 +172,4 @@ func sendErrorResponse(conn *websocket.Conn, message string, statusCode int) {
 		"body":        message,
 	}
 	conn.WriteJSON(response)
-}
-
-func forwardMessageAsIs(conn *websocket.Conn, message []byte) {
-	conn.WriteMessage(websocket.TextMessage, message)
 }
